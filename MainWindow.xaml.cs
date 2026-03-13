@@ -1,0 +1,341 @@
+using System.Collections.Specialized;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
+using BetterTerminal.Services;
+using BetterTerminal.ViewModels;
+using BetterTerminal.Views;
+using EasyWindowsTerminalControl;
+
+namespace BetterTerminal;
+
+public partial class MainWindow : Window
+{
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    private readonly MainViewModel _vm;
+
+    // One terminal control per session, keyed by session Id.
+    private readonly Dictionary<Guid, EasyTerminalControl> _terminals = new();
+
+    // Idle debounce timers — fire 500 ms after last output to mark session idle.
+    private readonly Dictionary<Guid, DispatcherTimer> _idleTimers = new();
+
+    private SessionViewModel? _draggedSession;
+    private Point             _dragStartPoint;
+    private FrameworkElement? _dragSourceContainer;
+
+    // True while a terminal's hosted Win32 HWND has keyboard focus.
+    private bool _anyTerminalHasFocus;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+
+        // Apply Windows 11 rounded corners via DWM.
+        SourceInitialized += (_, _) =>
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            int preference = 2; // DWMWCP_ROUND
+            DwmSetWindowAttribute(hwnd, 33, ref preference, sizeof(int));
+        };
+
+        _vm = new MainViewModel();
+        _vm.RenameRequested += OnRenameRequested;
+        _vm.PropertyChanged += OnViewModelPropertyChanged;
+        _vm.Sessions.CollectionChanged += OnSessionsChanged;
+
+        // Create terminals for sessions that already exist (from the VM constructor).
+        // We do this before setting DataContext so every terminal is ready before
+        // any binding fires and tries to show one.
+        foreach (var session in _vm.Sessions)
+            AttachTerminal(session);
+
+        UpdateVisibility();
+
+        // Intercept Tab at the Win32 message level before WPF's HwndHost tab-traversal runs.
+        ComponentDispatcher.ThreadPreprocessMessage += OnThreadPreprocessMessage;
+        Closed += (_, _) => ComponentDispatcher.ThreadPreprocessMessage -= OnThreadPreprocessMessage;
+
+        DataContext = _vm;
+    }
+
+    // ── Terminal lifecycle ───────────────────────────────────────────────
+
+    private void AttachTerminal(SessionViewModel session)
+    {
+        var theme = TerminalThemeFactory.CreateDark();
+
+        var term = new EasyTerminalControl
+        {
+            StartupCommandLine         = session.Shell,
+            // Font must be set before Theme so it's picked up by SetTheme internally.
+            FontFamilyWhenSettingTheme = new FontFamily("Cascadia Mono"),
+            FontSizeWhenSettingTheme   = 12,
+            Theme                      = theme,
+            HorizontalAlignment        = HorizontalAlignment.Stretch,
+            VerticalAlignment          = VerticalAlignment.Stretch,
+            // Start hidden; UpdateVisibility will show the right one.
+            Visibility                 = Visibility.Hidden,
+        };
+
+        // Track whether any terminal HWND has Win32 focus, so we know when to
+        // forward Tab in OnThreadPreprocessMessage.
+        term.GotKeyboardFocus  += (_, _) => _anyTerminalHasFocus = true;
+        term.LostKeyboardFocus += (_, _) =>
+            _anyTerminalHasFocus = _terminals.Values.Any(t => t.IsKeyboardFocusWithin);
+
+        _terminals[session.Id] = term;
+        TerminalHost.Children.Add(term);
+
+        term.Loaded += (_, _) =>
+        {
+            if (term.ConPTYTerm is not { } pty) return;
+            pty.InterceptOutputToUITerminal = (ref Span<char> output) =>
+            {
+                if (output.Length == 0) return;
+                var oscTitle = ParseOscTitle(output);   // sync — Span can't be captured
+                Dispatcher.BeginInvoke(() =>
+                {
+                    session.IsActive = true;
+
+                    // Restart idle timer — session goes red 500 ms after output stops.
+                    if (!_idleTimers.TryGetValue(session.Id, out var timer))
+                    {
+                        timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+                        timer.Tick += (_, _) => { timer.Stop(); session.IsActive = false; };
+                        _idleTimers[session.Id] = timer;
+                    }
+                    timer.Stop();
+                    timer.Start();
+
+                    if (oscTitle is not null)
+                        session.Title = oscTitle;
+                });
+            };
+        };
+    }
+
+    private void DetachTerminal(SessionViewModel session)
+    {
+        if (!_terminals.TryGetValue(session.Id, out var term)) return;
+        TerminalHost.Children.Remove(term);
+        _terminals.Remove(session.Id);
+        // EasyTerminalControl doesn't implement IDisposable publicly,
+        // but try anyway in case a future version does.
+        (term as IDisposable)?.Dispose();
+
+        if (_idleTimers.TryGetValue(session.Id, out var timer))
+        {
+            timer.Stop();
+            _idleTimers.Remove(session.Id);
+        }
+    }
+
+    /// <summary>
+    /// Shows the terminal for the active session; hides all others.
+    /// Uses Hidden (not Collapsed) so each HwndHost keeps its HWND alive
+    /// and the shell process keeps running in the background.
+    /// </summary>
+    private void UpdateVisibility()
+    {
+        var activeId = _vm.ActiveSession?.Id;
+        foreach (var (id, term) in _terminals)
+            term.Visibility = id == activeId ? Visibility.Visible : Visibility.Hidden;
+    }
+
+    // ── Collection / property change handlers ───────────────────────────
+
+    private void OnSessionsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.NewItems is not null)
+            foreach (SessionViewModel s in e.NewItems)
+                AttachTerminal(s);
+
+        if (e.OldItems is not null)
+            foreach (SessionViewModel s in e.OldItems)
+                DetachTerminal(s);
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MainViewModel.ActiveSession))
+            UpdateVisibility();
+    }
+
+    // ── Keyboard forwarding ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Intercepts Win32 messages before WPF processes them.
+    /// WPF's HwndHost tab-traversal runs at the Win32 level and never reaches
+    /// OnPreviewKeyDown, so this is the only reliable interception point.
+    /// </summary>
+    private void OnThreadPreprocessMessage(ref MSG msg, ref bool handled)
+    {
+        if (handled || !_anyTerminalHasFocus || !IsActive) return;
+
+        const int WM_KEYDOWN = 0x0100;
+        const int VK_TAB     = 0x09;
+
+        if (msg.message == WM_KEYDOWN && (int)msg.wParam == VK_TAB
+            && _vm.ActiveSession is { } session
+            && _terminals.TryGetValue(session.Id, out var term))
+        {
+            term.ConPTYTerm?.WriteToTerm("\t");
+            handled = true;
+        }
+    }
+
+    // ── Window controls ──────────────────────────────────────────────────
+
+    private void MinimizeButton_Click(object sender, RoutedEventArgs e)
+        => WindowState = WindowState.Minimized;
+
+    private void MaximizeButton_Click(object sender, RoutedEventArgs e)
+        => WindowState = WindowState == WindowState.Maximized
+            ? WindowState.Normal
+            : WindowState.Maximized;
+
+    private void CloseButton_Click(object sender, RoutedEventArgs e)
+        => Close();
+
+    // ── Drag-and-drop reordering ─────────────────────────────────────────
+
+    private void SessionList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _dragStartPoint = e.GetPosition(null);
+        _draggedSession = (e.OriginalSource as FrameworkElement)?.DataContext as SessionViewModel;
+    }
+
+    private void SessionList_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || _draggedSession is null) return;
+
+        var pos = e.GetPosition(null);
+        if (Math.Abs(pos.X - _dragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(pos.Y - _dragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+            return;
+
+        _dragSourceContainer = SessionList.ItemContainerGenerator
+                                   .ContainerFromItem(_draggedSession) as FrameworkElement;
+        if (_dragSourceContainer is not null)
+            _dragSourceContainer.Opacity = 0.4;
+
+        DragDrop.DoDragDrop((DependencyObject)sender, _draggedSession, DragDropEffects.Move);
+
+        // DoDragDrop blocks until drag ends — restore unconditionally here.
+        if (_dragSourceContainer is not null)
+        {
+            _dragSourceContainer.Opacity = 1.0;
+            _dragSourceContainer = null;
+        }
+        _draggedSession = null;
+    }
+
+    private void SessionList_DragOver(object sender, DragEventArgs e)
+    {
+        UpdateDropLine(e.GetPosition(SessionList));
+        e.Effects = DragDropEffects.Move;
+        e.Handled = true;
+    }
+
+    private void SessionList_Drop(object sender, DragEventArgs e)
+    {
+        HideDropLine();
+        if (_draggedSession is null) return;
+
+        var listBox = (ListBox)sender;
+        int targetIndex = GetDropIndex(listBox, e.GetPosition(listBox));
+        int sourceIndex = _vm.Sessions.IndexOf(_draggedSession);
+
+        if (sourceIndex >= 0 && sourceIndex != targetIndex)
+            _vm.Sessions.Move(sourceIndex, targetIndex);
+
+        _draggedSession = null;
+    }
+
+    private void SessionList_DragLeave(object sender, DragEventArgs e)
+        => HideDropLine();
+
+    private void UpdateDropLine(Point dropPos)
+    {
+        double lineY = SessionList.ActualHeight - 2; // default: after last item
+
+        for (int i = 0; i < SessionList.Items.Count; i++)
+        {
+            if (SessionList.ItemContainerGenerator.ContainerFromIndex(i) is not FrameworkElement item)
+                continue;
+            var topY = item.TranslatePoint(new Point(0, 0), SessionList).Y;
+            var midY = topY + item.ActualHeight / 2;
+            if (dropPos.Y < midY) { lineY = topY; break; }
+            if (i == SessionList.Items.Count - 1)
+                lineY = topY + item.ActualHeight;
+        }
+
+        Canvas.SetTop(DropLine, lineY - 1);
+        Canvas.SetLeft(DropLine, 8);
+        DropLine.Width      = DropCanvas.ActualWidth - 16;
+        DropLine.Visibility = Visibility.Visible;
+    }
+
+    private void HideDropLine()
+        => DropLine.Visibility = Visibility.Collapsed;
+
+    private static int GetDropIndex(ListBox listBox, Point dropPos)
+    {
+        for (int i = 0; i < listBox.Items.Count; i++)
+        {
+            if (listBox.ItemContainerGenerator.ContainerFromIndex(i) is not FrameworkElement item)
+                continue;
+            var midY = item.TranslatePoint(new Point(0, item.ActualHeight / 2), listBox).Y;
+            if (dropPos.Y < midY) return i;
+        }
+        return listBox.Items.Count - 1;
+    }
+
+    // ── OSC title parser ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Scans raw terminal output for an OSC 0 or OSC 2 title sequence and returns
+    /// the extracted title, or null if none is present.
+    /// Must be called synchronously (Span cannot be captured in a delegate).
+    /// </summary>
+    private static string? ParseOscTitle(ReadOnlySpan<char> output)
+    {
+        int esc = output.IndexOf('\x1b');
+        while (esc >= 0 && esc < output.Length - 3)
+        {
+            var rest = output[(esc + 1)..];
+            if (rest[0] == ']' && rest.Length > 3 &&
+                (rest[1] == '0' || rest[1] == '2') && rest[2] == ';')
+            {
+                var titleSpan = rest[3..];
+                // BEL terminator
+                int bel = titleSpan.IndexOf('\x07');
+                if (bel >= 0) return titleSpan[..bel].ToString();
+                // ST terminator (ESC \)
+                int st = titleSpan.IndexOf('\x1b');
+                if (st >= 0 && st < titleSpan.Length - 1 && titleSpan[st + 1] == '\\')
+                    return titleSpan[..st].ToString();
+            }
+            int next = output[(esc + 1)..].IndexOf('\x1b');
+            esc = next >= 0 ? esc + 1 + next : -1;
+        }
+        return null;
+    }
+
+    // ── Rename handler ───────────────────────────────────────────────────
+
+    private void OnRenameRequested(SessionViewModel session)
+    {
+        var dialog = new RenameDialog(session.Title) { Owner = this };
+        if (dialog.ShowDialog() == true && dialog.NewName is not null)
+            session.Title = dialog.NewName;
+    }
+}

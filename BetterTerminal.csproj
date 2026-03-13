@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>BetterTerminal</RootNamespace>
+    <AssemblyName>BetterTerminal</AssemblyName>
+    <!-- Source generators need this for CommunityToolkit -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Tell ConPTY package to copy OpenConsole.exe for x64 host -->
+    <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
+  </PropertyGroup>
+
+  <!-- Exclude test project from this project's compile glob -->
+  <ItemGroup>
+    <Compile Remove="BetterTerminal.Tests\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
+    <PackageReference Include="EasyWindowsTerminalControl" Version="1.0.36" />
+  </ItemGroup>
+
+  <!--
+    The CI.Microsoft.Windows.Console.ConPTY package ships its MSBuild targets as
+    "Microsoft.Windows.Console.ConPTY.targets" which doesn't match the NuGet package
+    ID, so NuGet never auto-imports it for direct or transitive references.
+    We import it explicitly so that ConptyRequiresx64Host above takes effect and
+    OpenConsole.exe is copied to x64\ in the output directory.
+  -->
+  <Import Project="$(NuGetPackageRoot)ci.microsoft.windows.console.conpty\1.22.250314001\build\Microsoft.Windows.Console.ConPTY.targets"
+          Condition="Exists('$(NuGetPackageRoot)ci.microsoft.windows.console.conpty\1.22.250314001\build\Microsoft.Windows.Console.ConPTY.targets')" />
+
+  <!--
+    conpty.dll ships as RID win10-x64 but .NET 8 only probes runtimes/win-x64/native/
+    at runtime (NETSDK1206: "the asset won't be used").  Copy it to the output root so
+    the Windows DLL loader always finds it via the standard exe-directory search.
+    We follow the same <None>/<Link> pattern used for OpenConsole.exe above.
+  -->
+  <ItemGroup>
+    <None Include="$(NuGetPackageRoot)ci.microsoft.windows.console.conpty\1.22.250314001\runtimes\win10-x64\native\conpty.dll"
+          Condition="Exists('$(NuGetPackageRoot)ci.microsoft.windows.console.conpty\1.22.250314001\runtimes\win10-x64\native\conpty.dll')">
+      <Link>conpty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
