@@ -176,6 +176,16 @@
                                 </ContextMenu>
                             </Border.ContextMenu>
 
+                            <Grid>
+                                <!-- Status tint: semi-transparent colour wash over the whole row -->
+                                <Rectangle x:Name="StatusTint" Fill="#10E81224"/>
+
+                                <!-- Status line: solid 2 px strip pinned to the bottom -->
+                                <Rectangle x:Name="StatusLine"
+                                           Height="1"
+                                           VerticalAlignment="Bottom"
+                                           Fill="#99E81224"/>
+
                             <Grid Margin="10,0,6,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
@@ -226,6 +236,7 @@
                                             CommandParameter="{Binding}"/>
                                 </Grid>
                             </Grid>
+                            </Grid><!-- /outer layer grid -->
                         </Border>
 
                         <DataTemplate.Triggers>
@@ -236,7 +247,9 @@
                                         Value="{StaticResource ActiveBrush}"/>
                             </DataTrigger>
                             <DataTrigger Value="True" Binding="{Binding IsActive}">
-                                <Setter TargetName="StatusDot" Property="Fill" Value="#16C60C"/>
+                                <Setter TargetName="StatusDot"  Property="Fill" Value="#16C60C"/>
+                                <Setter TargetName="StatusTint" Property="Fill" Value="#1016C60C"/>
+                                <Setter TargetName="StatusLine" Property="Fill" Value="#9916C60C"/>
                             </DataTrigger>
                             <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Row"       Property="Background"

@@ -19,6 +19,9 @@ public partial class MainWindow : Window
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
+    [DllImport("user32.dll")]
+    private static extern short GetKeyState(int nVirtKey);
+
     private readonly MainViewModel _vm;
 
     // One terminal control per session, keyed by session Id.
@@ -178,17 +181,44 @@ public partial class MainWindow : Window
     /// </summary>
     private void OnThreadPreprocessMessage(ref MSG msg, ref bool handled)
     {
-        if (handled || !_anyTerminalHasFocus || !IsActive) return;
+        if (handled || !IsActive) return;
+        if (_vm.ActiveSession is not { } session) return;
+        if (!_terminals.TryGetValue(session.Id, out var term)) return;
 
         const int WM_KEYDOWN = 0x0100;
         const int VK_TAB     = 0x09;
+        const int VK_C       = 0x43;
+        const int VK_V       = 0x56;
+        const int VK_CONTROL = 0x11;
 
-        if (msg.message == WM_KEYDOWN && (int)msg.wParam == VK_TAB
-            && _vm.ActiveSession is { } session
-            && _terminals.TryGetValue(session.Id, out var term))
+        if (msg.message != WM_KEYDOWN) return;
+
+        int  vk       = (int)msg.wParam;
+        bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+
+        if (vk == VK_TAB && !ctrlDown && _anyTerminalHasFocus)
         {
             term.ConPTYTerm?.WriteToTerm("\t");
             handled = true;
+        }
+        else if (ctrlDown && vk == VK_C && _anyTerminalHasFocus)
+        {
+            // Ctrl+C → send ETX (interrupt); standard terminal behaviour.
+            term.ConPTYTerm?.WriteToTerm("\x03");
+            handled = true;
+        }
+        else if (ctrlDown && vk == VK_V && Keyboard.FocusedElement is not TextBox)
+        {
+            // Ctrl+V → paste clipboard text into the terminal.
+            // Deliberately does not require _anyTerminalHasFocus: WPF's GotKeyboardFocus
+            // on an HwndHost child can be unreliable, so we guard instead by ensuring no
+            // WPF text input (rename dialog, etc.) currently has focus.
+            var text = Clipboard.GetText();
+            if (!string.IsNullOrEmpty(text))
+            {
+                term.ConPTYTerm?.WriteToTerm(text);
+                handled = true;
+            }
         }
     }
 
