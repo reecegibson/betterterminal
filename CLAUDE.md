@@ -29,7 +29,7 @@ dotnet test
 
 Test project: `BetterTerminal.Tests/` (separate `.csproj`, excluded from the main project's SDK glob via `<Compile Remove="BetterTerminal.Tests\**\*"/>`).
 
-37 tests total — all must pass before merging.
+54 tests total — all must pass before merging.
 
 ---
 
@@ -43,7 +43,7 @@ BetterTerminal/
 │                                     CloseTitleBarBtn, ContextMenu/MenuItem/Separator templates)
 ├── App.xaml.cs                     — OnStartup creates MainWindow; no StartupUri
 ├── MainWindow.xaml                 — layout: 2-row × 3-col Grid (title bar / content)
-├── MainWindow.xaml.cs              — terminal lifecycle, drag-drop, OSC parser, Tab forwarding
+├── MainWindow.xaml.cs              — terminal lifecycle, drag-drop, Tab forwarding
 ├── Models/
 │   └── Session.cs                  — plain record: Id (Guid), Title, Shell, WorkingDirectory
 ├── ViewModels/
@@ -53,6 +53,7 @@ BetterTerminal/
 ├── Views/
 │   └── RenameDialog.xaml/.cs       — SizeToContent=Height modal; IsDefault/IsCancel buttons
 ├── Services/
+│   ├── OscTitleParser.cs           — ParseOscTitle(): extracts OSC 0/2 titles, handles fragmentation
 │   ├── ShellLocator.cs             — Resolve(): pwsh → powershell.exe → cmd.exe
 │   └── TerminalThemeFactory.cs     — CreateDark(): Campbell colour scheme for EasyTerminalControl
 ├── Persistence/                    — empty (M3 not yet implemented)
@@ -60,6 +61,7 @@ BetterTerminal/
 └── BetterTerminal.Tests/
     ├── ViewModels/MainViewModelTests.cs      — 14 tests
     ├── ViewModels/SessionViewModelTests.cs   — 9 tests
+    ├── Services/OscTitleParserTests.cs        — 17 tests
     ├── Services/ShellLocatorTests.cs         — 4 tests
     └── Services/TerminalThemeFactoryTests.cs — 9 tests
 ```

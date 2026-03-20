@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -29,6 +30,10 @@ public partial class MainWindow : Window
 
     // Idle debounce timers — fire 500 ms after last output to mark session idle.
     private readonly Dictionary<Guid, DispatcherTimer> _idleTimers = new();
+
+    // Per-session buffer for partial OSC title sequences split across ConPTY chunks.
+    // ConcurrentDictionary because ConPTY callbacks run on per-session background threads.
+    private readonly ConcurrentDictionary<Guid, string> _oscBuffers = new();
 
     private SessionViewModel? _draggedSession;
     private Point             _dragStartPoint;
@@ -103,7 +108,35 @@ public partial class MainWindow : Window
             pty.InterceptOutputToUITerminal = (ref Span<char> output) =>
             {
                 if (output.Length == 0) return;
-                var oscTitle = ParseOscTitle(output);   // sync — Span can't be captured
+
+                // Resolve OSC title, handling sequences split across chunks.
+                string? oscTitle;
+                int trailingPartialStart;
+
+                if (_oscBuffers.TryRemove(session.Id, out var buffered))
+                {
+                    // Combine buffered partial with current chunk (requires allocation).
+                    var combined = string.Concat(buffered, output.ToString());
+                    oscTitle = OscTitleParser.ParseOscTitle(combined.AsSpan(), out trailingPartialStart);
+                    if (trailingPartialStart >= 0)
+                    {
+                        var partial = combined[trailingPartialStart..];
+                        if (partial.Length <= 512)
+                            _oscBuffers[session.Id] = partial;
+                    }
+                }
+                else
+                {
+                    // Fast path — parse Span directly, no allocation unless partial found.
+                    oscTitle = OscTitleParser.ParseOscTitle(output, out trailingPartialStart);
+                    if (trailingPartialStart >= 0)
+                    {
+                        var partial = output[trailingPartialStart..].ToString();
+                        if (partial.Length <= 512)
+                            _oscBuffers[session.Id] = partial;
+                    }
+                }
+
                 Dispatcher.BeginInvoke(() =>
                 {
                     session.IsActive = true;
@@ -139,6 +172,8 @@ public partial class MainWindow : Window
             timer.Stop();
             _idleTimers.Remove(session.Id);
         }
+
+        _oscBuffers.TryRemove(session.Id, out _);
     }
 
     /// <summary>
@@ -327,37 +362,6 @@ public partial class MainWindow : Window
             if (dropPos.Y < midY) return i;
         }
         return listBox.Items.Count - 1;
-    }
-
-    // ── OSC title parser ─────────────────────────────────────────────────
-
-    /// <summary>
-    /// Scans raw terminal output for an OSC 0 or OSC 2 title sequence and returns
-    /// the extracted title, or null if none is present.
-    /// Must be called synchronously (Span cannot be captured in a delegate).
-    /// </summary>
-    private static string? ParseOscTitle(ReadOnlySpan<char> output)
-    {
-        int esc = output.IndexOf('\x1b');
-        while (esc >= 0 && esc < output.Length - 3)
-        {
-            var rest = output[(esc + 1)..];
-            if (rest[0] == ']' && rest.Length > 3 &&
-                (rest[1] == '0' || rest[1] == '2') && rest[2] == ';')
-            {
-                var titleSpan = rest[3..];
-                // BEL terminator
-                int bel = titleSpan.IndexOf('\x07');
-                if (bel >= 0) return titleSpan[..bel].ToString();
-                // ST terminator (ESC \)
-                int st = titleSpan.IndexOf('\x1b');
-                if (st >= 0 && st < titleSpan.Length - 1 && titleSpan[st + 1] == '\\')
-                    return titleSpan[..st].ToString();
-            }
-            int next = output[(esc + 1)..].IndexOf('\x1b');
-            esc = next >= 0 ? esc + 1 + next : -1;
-        }
-        return null;
     }
 
     // ── Rename handler ───────────────────────────────────────────────────
