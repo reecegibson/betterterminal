@@ -224,23 +224,36 @@ public partial class MainWindow : Window
         const int VK_TAB     = 0x09;
         const int VK_C       = 0x43;
         const int VK_V       = 0x56;
+        const int VK_SHIFT   = 0x10;
         const int VK_CONTROL = 0x11;
 
         if (msg.message != WM_KEYDOWN) return;
 
-        int  vk       = (int)msg.wParam;
-        bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        int  vk        = (int)msg.wParam;
+        bool ctrlDown  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool shiftDown = (GetKeyState(VK_SHIFT)   & 0x8000) != 0;
 
         if (vk == VK_TAB && !ctrlDown && _anyTerminalHasFocus)
         {
             term.ConPTYTerm?.WriteToTerm("\t");
             handled = true;
         }
-        else if (ctrlDown && vk == VK_C && _anyTerminalHasFocus)
+        else if (ctrlDown && vk == VK_C && Keyboard.FocusedElement is not TextBox)
         {
-            // Ctrl+C → send ETX (interrupt); standard terminal behaviour.
-            term.ConPTYTerm?.WriteToTerm("\x03");
-            handled = true;
+            var selected = term.Terminal?.GetSelectedText();
+            if (!string.IsNullOrEmpty(selected))
+            {
+                // Selection exists → copy to clipboard.
+                Clipboard.SetText(selected);
+                handled = true;
+            }
+            else if (!shiftDown)
+            {
+                // No selection, no Shift → send interrupt (ETX).
+                term.ConPTYTerm?.WriteToTerm("\x03");
+                handled = true;
+            }
+            // Ctrl+Shift+C with no selection → no-op.
         }
         else if (ctrlDown && vk == VK_V && Keyboard.FocusedElement is not TextBox)
         {
