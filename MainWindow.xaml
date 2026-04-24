@@ -115,6 +115,7 @@
               Background="{StaticResource SidebarBrush}">
             <Grid.RowDefinitions>
                 <RowDefinition Height="*"/>      <!-- session list -->
+                <RowDefinition Height="Auto"/>   <!-- clear-history btn -->
                 <RowDefinition Height="Auto"/>   <!-- new-session btn -->
             </Grid.RowDefinitions>
 
@@ -275,8 +276,18 @@
                            Visibility="Collapsed"/>
             </Canvas>
 
-            <!-- New-session button -->
+            <!-- Clear-history button -->
             <Button Grid.Row="1"
+                    Content="🗑  Clear History"
+                    Height="36"
+                    FontSize="12"
+                    Style="{StaticResource GhostBtn}"
+                    BorderBrush="{StaticResource SepBrush}"
+                    BorderThickness="0,1,0,0"
+                    Click="ClearHistory_Click"/>
+
+            <!-- New-session button -->
+            <Button Grid.Row="2"
                     Content="＋  New Session"
                     Height="40"
                     FontSize="12"

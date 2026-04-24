@@ -283,6 +283,22 @@ public partial class MainWindow : Window
     private void CloseButton_Click(object sender, RoutedEventArgs e)
         => Close();
 
+    // ── Clear history ───────────────────────────────────────────────────
+
+    private void ClearHistory_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm.ActiveSession is not { } session) return;
+        if (!_terminals.TryGetValue(session.Id, out var term)) return;
+        if (term.ConPTYTerm is null) return;
+
+        // Send the CSI 3 J escape sequence directly to the terminal renderer
+        // via WriteToUITerminal.  This bypasses the shell entirely — nothing
+        // is typed into the prompt — and tells the renderer to purge its
+        // scrollback buffer while leaving visible content untouched.
+        var seq = TerminalHistoryService.BuildClearSequence();
+        term.ConPTYTerm.WriteToUITerminal(seq.AsSpan());
+    }
+
     // ── Drag-and-drop reordering ─────────────────────────────────────────
 
     private void SessionList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
