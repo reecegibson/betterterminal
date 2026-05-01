@@ -192,6 +192,9 @@ public partial class MainWindow : Window
 
     private void OnSessionsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        // Move just reorders the collection — terminals stay as they are.
+        if (e.Action == NotifyCollectionChangedAction.Move) return;
+
         if (e.NewItems is not null)
             foreach (SessionViewModel s in e.NewItems)
                 AttachTerminal(s);
