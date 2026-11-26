@@ -23,6 +23,38 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern short GetKeyState(int nVirtKey);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int        cbSize;
+        public NativeRect rcMonitor;   // full monitor, including the taskbar
+        public NativeRect rcWork;      // monitor minus taskbar / appbars
+        public uint       dwFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MINMAXINFO
+    {
+        public NativePoint ptReserved;
+        public NativePoint ptMaxSize;
+        public NativePoint ptMaxPosition;
+        public NativePoint ptMinTrackSize;
+        public NativePoint ptMaxTrackSize;
+    }
+
     private readonly MainViewModel _vm;
 
     // One terminal control per session, keyed by session Id.
@@ -46,12 +78,18 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // Apply Windows 11 rounded corners via DWM.
         SourceInitialized += (_, _) =>
         {
             var hwnd = new WindowInteropHelper(this).Handle;
+
+            // Apply Windows 11 rounded corners via DWM.
             int preference = 2; // DWMWCP_ROUND
             DwmSetWindowAttribute(hwnd, 33, ref preference, sizeof(int));
+
+            // Keep maximize inside the monitor's work area (see OnWindowMessage).
+            var source = HwndSource.FromHwnd(hwnd);
+            source?.AddHook(OnWindowMessage);
+            Closed += (_, _) => source?.RemoveHook(OnWindowMessage);
         };
 
         _vm = new MainViewModel();
@@ -271,6 +309,55 @@ public partial class MainWindow : Window
                 handled = true;
             }
         }
+    }
+
+    // ── Maximize bounds ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// A borderless window (<c>WindowStyle="None"</c>) has no OS frame for Windows to
+    /// subtract, so the default maximized size is the monitor's whole pixel rectangle —
+    /// which covers the taskbar. Answering WM_GETMINMAXINFO with the monitor's work area
+    /// fixes that, per-monitor, for every maximize path (button, double-click, Win+Up,
+    /// drag-to-top, Aero Snap).
+    ///
+    /// <paramref name="handled"/> is deliberately left alone: WPF's own WM_GETMINMAXINFO
+    /// handler is what enforces this window's MinWidth / MinHeight via ptMinTrackSize, and
+    /// claiming the message would skip it. We only overwrite the two fields WPF never sets.
+    /// </summary>
+    private IntPtr OnWindowMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        const int WM_GETMINMAXINFO = 0x0024;
+
+        if (msg == WM_GETMINMAXINFO)
+            ClampMaximizedBounds(hwnd, lParam);
+
+        return IntPtr.Zero;
+    }
+
+    private static void ClampMaximizedBounds(IntPtr hwnd, IntPtr lParam)
+    {
+        const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+        if (lParam == IntPtr.Zero) return;
+
+        var monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (monitor == IntPtr.Zero) return;
+
+        var info = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(monitor, ref info)) return;
+
+        var placement = WindowPlacementService.MaximizedPlacement(
+            new WindowPlacementService.Bounds(
+                info.rcMonitor.Left, info.rcMonitor.Top, info.rcMonitor.Right, info.rcMonitor.Bottom),
+            new WindowPlacementService.Bounds(
+                info.rcWork.Left, info.rcWork.Top, info.rcWork.Right, info.rcWork.Bottom));
+
+        // The OS pre-fills MINMAXINFO with defaults before the message is dispatched,
+        // so read it back and override only the maximized rectangle.
+        var mmi = Marshal.PtrToStructure<MINMAXINFO>(lParam);
+        mmi.ptMaxPosition = new NativePoint { X = placement.X,     Y = placement.Y      };
+        mmi.ptMaxSize     = new NativePoint { X = placement.Width, Y = placement.Height };
+        Marshal.StructureToPtr(mmi, lParam, false);
     }
 
     // ── Window controls ──────────────────────────────────────────────────

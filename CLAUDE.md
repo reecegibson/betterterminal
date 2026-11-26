@@ -29,7 +29,12 @@ dotnet test
 
 Test project: `BetterTerminal.Tests/` (separate `.csproj`, excluded from the main project's SDK glob via `<Compile Remove="BetterTerminal.Tests\**\*"/>`).
 
-54 tests total — all must pass before merging.
+87 tests total — all must pass before merging.
+
+```powershell
+# Single test class / namespace
+dotnet test --filter "FullyQualifiedName~WindowPlacementServiceTests"
+```
 
 ---
 
@@ -55,7 +60,8 @@ BetterTerminal/
 ├── Services/
 │   ├── OscTitleParser.cs           — ParseOscTitle(): extracts OSC 0/2 titles, handles fragmentation
 │   ├── ShellLocator.cs             — Resolve(): pwsh → powershell.exe → cmd.exe
-│   └── TerminalThemeFactory.cs     — CreateDark(): Campbell colour scheme for EasyTerminalControl
+│   ├── TerminalThemeFactory.cs     — CreateDark(): Campbell colour scheme for EasyTerminalControl
+│   └── WindowPlacementService.cs   — MaximizedPlacement(): work-area geometry for WM_GETMINMAXINFO
 ├── Persistence/                    — empty (M3 not yet implemented)
 ├── Controls/                       — empty (future)
 └── BetterTerminal.Tests/
@@ -63,7 +69,8 @@ BetterTerminal/
     ├── ViewModels/SessionViewModelTests.cs   — 9 tests
     ├── Services/OscTitleParserTests.cs        — 17 tests
     ├── Services/ShellLocatorTests.cs         — 4 tests
-    └── Services/TerminalThemeFactoryTests.cs — 9 tests
+    ├── Services/TerminalThemeFactoryTests.cs — 9 tests
+    └── Services/WindowPlacementServiceTests.cs — 12 tests
 ```
 
 ---
@@ -262,6 +269,27 @@ SourceInitialized += (_, _) =>
     DwmSetWindowAttribute(hwnd, 33, ref preference, sizeof(int));
 };
 ```
+
+### Borderless maximize covers the taskbar
+
+`WindowStyle="None"` leaves Windows no frame to subtract, so the default maximized size is the
+monitor's entire pixel rectangle — on top of the taskbar. `MainWindow.OnWindowMessage` (an
+`HwndSource` hook added in `SourceInitialized`) answers `WM_GETMINMAXINFO` with the work area
+from `GetMonitorInfo` instead, which fixes every maximize path at once: the title-bar button,
+double-click, Win+Up, drag-to-top and Aero Snap.
+
+Two constraints on that handler:
+
+- It overwrites **only** `ptMaxSize` and `ptMaxPosition`, and leaves `handled` as `false`.
+  WPF's own `WM_GETMINMAXINFO` handling is what enforces `MinWidth` / `MinHeight` via
+  `ptMinTrackSize`; claiming the message silently breaks the window's minimum size.
+- `ptMaxPosition` is **monitor-relative**, not screen-relative — hence the
+  `work.Left - monitor.Left` arithmetic in `WindowPlacementService`. Without it, a bottom
+  taskbar still works while a left/top one, or a secondary monitor with negative
+  coordinates, places the window wrong.
+
+The geometry lives in `Services/WindowPlacementService.MaximizedPlacement` so it is testable
+without an HWND; the code-behind only marshals `MINMAXINFO`.
 
 ---
 
